@@ -179,3 +179,32 @@ exports.toggleMute = async (req, res, next) => {
     next(error);
   }
 };
+
+// GET /api/conversations/:id
+exports.getConversationById = async (req, res, next) => {
+  try {
+    const currentUserId = req.user._id;
+    const conversation = await Conversation.findOne({
+      _id: req.params.id,
+      participants: currentUserId,
+    })
+      .populate('participants', 'name phone profilePhoto about online lastSeen privacySettings')
+      .populate('lastMessage');
+
+    if (!conversation) {
+      return res.status(404).json({
+        success: false,
+        message: 'Conversation not found',
+        errorCode: 'CONVERSATION_NOT_FOUND',
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: conversation,
+    });
+  } catch (error) {
+    next(error);
+  }
+};
+

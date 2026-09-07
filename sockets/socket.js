@@ -104,11 +104,21 @@ const initSocket = (server, corsOrigin) => {
           return;
         }
 
+        let targetReceiverId = receiverId;
+        if (!targetReceiverId && conversation.participants) {
+          const otherParticipant = conversation.participants.find(
+            (p) => p.toString() !== userId.toString()
+          );
+          if (otherParticipant) {
+            targetReceiverId = otherParticipant.toString();
+          }
+        }
+
         // Create message in DB
         const message = await Message.create({
           conversationId,
           senderId: userId,
-          receiverId,
+          receiverId: targetReceiverId || userId,
           messageType,
           content,
           mediaUrl,
@@ -139,23 +149,35 @@ const initSocket = (server, corsOrigin) => {
         await conversation.save();
 
         // Check if receiver is online, update status to delivered if so
-        const isReceiverOnline = onlineUsers.has(receiverId.toString()) && onlineUsers.get(receiverId.toString()).size > 0;
+        const isReceiverOnline = targetReceiverId
+          ? onlineUsers.has(targetReceiverId.toString()) && onlineUsers.get(targetReceiverId.toString()).size > 0
+          : false;
+
         if (isReceiverOnline) {
           message.status = 'delivered';
           await message.save();
           populatedMessage.status = 'delivered';
         }
 
-        // Emit to receiver's room
-        io.to(`user:${receiverId}`).emit('message:new', {
+        // Emit to conversation room (for anyone actively in the chat room)
+        io.to(`conversation:${conversationId}`).emit('message:new', {
           message: populatedMessage,
           conversationId,
         });
 
-        // Emit to sender for synchronization
+        // Also emit to receiver personal room (for conversation list or notifications)
+        if (targetReceiverId) {
+          io.to(`user:${targetReceiverId}`).emit('message:new', {
+            message: populatedMessage,
+            conversationId,
+          });
+        }
+
+        // Emit confirmation to sender for instant sync
         socket.emit('message:sent_confirm', {
           tempId,
           message: populatedMessage,
+          conversationId,
         });
 
         if (callback) {
@@ -223,15 +245,17 @@ const initSocket = (server, corsOrigin) => {
       const { receiverId, callType, offer } = data;
       console.log(`[Call] Call initiated from ${socket.user.name} to ${receiverId} (${callType})`);
 
-      const isReceiverOnline = onlineUsers.has(receiverId.toString()) && onlineUsers.get(receiverId.toString()).size > 0;
-      if (!isReceiverOnline) {
+      if (!receiverId) {
         socket.emit('call:unavailable', {
           receiverId,
-          reason: 'User is currently offline',
+          reason: 'Invalid recipient',
         });
         return;
       }
 
+      const isReceiverOnline = onlineUsers.has(receiverId.toString()) && onlineUsers.get(receiverId.toString()).size > 0;
+
+      // Always deliver incoming call signal to receiver user room
       io.to(`user:${receiverId}`).emit('call:incoming', {
         caller: {
           _id: socket.user._id,
@@ -241,6 +265,20 @@ const initSocket = (server, corsOrigin) => {
         callType, // 'audio' or 'video'
         offer,
       });
+
+      // If receiver is not currently online, give a 25s window for device wake/reconnect
+      if (!isReceiverOnline) {
+        console.log(`[Call] Receiver ${receiverId} not in onlineUsers at initiate time`);
+        setTimeout(() => {
+          const stillOffline = !onlineUsers.has(receiverId.toString()) || onlineUsers.get(receiverId.toString()).size === 0;
+          if (stillOffline) {
+            socket.emit('call:unavailable', {
+              receiverId,
+              reason: 'User is not answering or offline',
+            });
+          }
+        }, 25000);
+      }
     });
 
     socket.on('call:accept', (data) => {
