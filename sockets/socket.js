@@ -159,33 +159,100 @@ const initSocket = (server, corsOrigin) => {
           populatedMessage.status = 'delivered';
         }
 
-        // Emit to conversation room (for anyone actively in the chat room)
-        io.to(`conversation:${conversationId}`).emit('message:new', {
-          message: populatedMessage,
-          conversationId,
-        });
+        const messagePayload = populatedMessage.toObject ? populatedMessage.toObject() : { ...populatedMessage };
+        if (tempId) {
+          messagePayload.tempId = tempId;
+        }
 
-        // Also emit to receiver personal room (for conversation list or notifications)
+        // Deliver to receiver only (prevents sender from receiving message:new twice, and receiver from receiving duplicate)
         if (targetReceiverId) {
           io.to(`user:${targetReceiverId}`).emit('message:new', {
-            message: populatedMessage,
+            message: messagePayload,
             conversationId,
           });
         }
 
-        // Emit confirmation to sender for instant sync
+        // For group conversations, emit to conversation room excluding sender
+        if (conversation.isGroup) {
+          socket.to(`conversation:${conversationId}`).emit('message:new', {
+            message: messagePayload,
+            conversationId,
+          });
+        }
+
+        // Emit confirmation to sender with tempId for reliable optimistic matching
         socket.emit('message:sent_confirm', {
           tempId,
-          message: populatedMessage,
+          message: messagePayload,
           conversationId,
         });
 
         if (callback) {
-          callback({ success: true, message: populatedMessage });
+          callback({ success: true, message: messagePayload });
         }
       } catch (err) {
         console.error('[Socket] message:send error:', err);
         if (callback) callback({ success: false, error: err.message });
+      }
+    });
+
+    // Message emoji reaction handler
+    socket.on('message:react', async (data) => {
+      try {
+        const { messageId, conversationId, emoji, receiverId } = data;
+        const message = await Message.findById(messageId);
+        if (!message) return;
+
+        if (!message.reactions) message.reactions = [];
+        const existingIdx = message.reactions.findIndex(
+          (r) => String(r.userId) === String(userId)
+        );
+
+        if (existingIdx !== -1) {
+          if (message.reactions[existingIdx].emoji === emoji) {
+            // Un-react if same emoji clicked again
+            message.reactions.splice(existingIdx, 1);
+          } else {
+            message.reactions[existingIdx].emoji = emoji;
+          }
+        } else {
+          message.reactions.push({ userId, emoji });
+        }
+
+        await message.save();
+
+        const reactionData = {
+          messageId,
+          conversationId,
+          reactions: message.reactions,
+          reactedBy: userId,
+          emoji,
+        };
+
+        io.to(`conversation:${conversationId}`).emit('message:reaction_update', reactionData);
+        if (receiverId) {
+          io.to(`user:${receiverId}`).emit('message:reaction_update', reactionData);
+        }
+        socket.emit('message:reaction_update', reactionData);
+      } catch (err) {
+        console.error('[Socket] message:react error:', err);
+      }
+    });
+
+    // Couple Love Ping ("Thinking of You" Heart Flutter)
+    socket.on('couple:love_ping', (data) => {
+      const { conversationId, receiverId } = data;
+      console.log(`[Couple] Love ping sent from ${socket.user.name} to ${receiverId}`);
+      if (receiverId) {
+        io.to(`user:${receiverId}`).emit('couple:love_ping', {
+          conversationId,
+          sender: {
+            _id: socket.user._id,
+            name: socket.user.name,
+            profilePhoto: socket.user.profilePhoto,
+          },
+          sentAt: new Date(),
+        });
       }
     });
 
