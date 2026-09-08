@@ -92,6 +92,13 @@ app.use('/api/calls', callRoutes);
 app.use('/api/privacy', privacyRoutes);
 app.use('/api/vault', vaultRoutes);
 
+app.get("/", (req, res) => {
+  res.status(200).json({
+    status: "ok",
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || "development",
+  });
+});
 // Central error handler
 app.use(errorHandler);
 
