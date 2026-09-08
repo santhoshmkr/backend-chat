@@ -23,6 +23,9 @@ const vaultRoutes = require('./routes/vault.routes');
 const app = express();
 const server = http.createServer(app);
 
+// Trust the nginx reverse proxy (1 hop) so req.ip / X-Forwarded-For
+// are handled correctly by express-rate-limit and other middleware
+app.set('trust proxy', 1);
 // Security middleware
 app.use(
   helmet({
